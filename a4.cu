@@ -4,6 +4,7 @@
 #include <cstdlib>
 // #include <string>
 #include <cuda.h>
+#include <mpi.h>
 using namespace std;
 
 // module load compiler/cuda/7.5/compilervars
@@ -11,8 +12,9 @@ using namespace std;
 // module load mpi/mpich/3.1.4/gcc/mpivars
 // module load apps/lammps/gpu
 
+#define block 1
+
 int dim = -1;
-int block = 2;
 vector<int> ptr, indices, data;
 vector<int> B,C;
 
@@ -100,14 +102,49 @@ __global__ void kernel(
 	}
 }
 
+__global__ void kernel_complex(
+		int *dim, 
+		int *ptr, 
+		int *indices, 
+		int *data,
+		int *B,
+		int *C)
+{
+	extern __shared__ int sum[];
+	int id = blockDim.x * blockIdx.x + threadIdx.x;
+	int tid = threadIdx.x;
+	int row = id/32;
+	int lane = id & (32 - 1);
+	if(row < *dim){
+		sum[tid] = 0;
+		for(int i=ptr[row] + lane; i<ptr[row+1]; i+=32)
+			sum[tid] += data[i] * B[indices[i]];
+		printf("row %d sum %d tid %d lane %d\n", row, sum[tid], tid, lane);
+		__syncthreads();
+		if(lane < 16) sum[tid] += sum[tid + 16];
+		if(lane < 8) sum[tid] += sum[tid + 8];
+		if(lane < 4) sum[tid] += sum[tid + 4];
+		if(lane < 2) sum[tid] += sum[tid + 2];
+		if(lane < 1) sum[tid] += sum[tid + 1];
+		if(lane == 0) C[row] = sum[tid];
+		printf("Final row %d sum %d tid %d \n", row, sum[tid], tid);
+	}
+}
+
 int main(int argc, char const *argv[])
 {
 	string file = "input1.txt";
 	parse_input(file);
 	init();
 
+	// int *count;
+	// cudaGetDeviceCount(count);
+	// cudaDeviceSynchronize();
+	// cout << "device count " << (*count) << endl;
+
+
 	int thread = (dim+block-1)/block;
-	kernel<<<block, thread>>>(d_dim, d_ptr, d_indices, d_data, d_B, d_C);
+	kernel_complex<<<block, 32*thread>>>(d_dim, d_ptr, d_indices, d_data, d_B, d_C);
 
 	anti_init();
 	for(int i=0; i<C.size(); ++i) cout << C[i] << " "; cout << endl;
