@@ -12,6 +12,7 @@ using namespace std;
 // module load apps/lammps/gpu
 
 int dim = -1;
+int block = 2;
 vector<int> ptr, indices, data;
 vector<int> B,C;
 
@@ -53,6 +54,7 @@ void parse_input(string file){
 	for(int i=0; i<indices.size(); ++i) cout << indices[i] << " "; cout << endl;
 	for(int i=0; i<data.size(); ++i) 	cout << data[i] << " "; cout << endl;
 	for(int i=0; i<B.size(); ++i) 		cout << B[i] << " "; cout << endl;
+	cout << "End of parsing\n";
 }
 
 void init(){
@@ -89,8 +91,13 @@ __global__ void kernel(
 		int *B,
 		int *C)
 {
-	int tid = threadIdx.x;
-	C[tid] = B[tid];
+	int row = blockDim.x * blockIdx.x + threadIdx.x;
+	if(row < *dim){
+		int sum = 0;
+		for(int i=ptr[row]; i<ptr[row+1]; ++i)
+			sum += data[i] * B[indices[i]];
+		C[row] = sum;
+	}
 }
 
 int main(int argc, char const *argv[])
@@ -99,7 +106,8 @@ int main(int argc, char const *argv[])
 	parse_input(file);
 	init();
 
-	kernel<<<1,dim>>>(d_dim, d_ptr, d_indices, d_data, d_B, d_C);
+	int thread = (dim+block-1)/block;
+	kernel<<<block, thread>>>(d_dim, d_ptr, d_indices, d_data, d_B, d_C);
 
 	anti_init();
 	for(int i=0; i<C.size(); ++i) cout << C[i] << " "; cout << endl;
