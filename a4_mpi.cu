@@ -2,6 +2,7 @@
 #include <fstream>
 #include <vector>
 #include <cstdlib>
+#include <cassert>
 // #include <string>
 #include <cuda.h>
 #include <mpi.h>
@@ -13,6 +14,11 @@ using namespace std;
 // module load apps/lammps/gpu
 
 #define block 1
+
+int pid;
+int k;
+int start=0, end, size;
+string writefile = "output.txt";
 
 int dim = -1;
 vector<int> ptr, indices, data;
@@ -31,7 +37,6 @@ void parse_input(string file){
 	fin >> temp >> temp >> temp >> dim >> temp;
 	fin >> r >> c >> d;
 	B = vector<int>(dim);
-	C = vector<int>(dim);
 	int current_row = 0;
 	int local_ptr = 0;
 	ptr.push_back(0);
@@ -52,23 +57,32 @@ void parse_input(string file){
 	for(int i=2; i<dim; ++i) fin >> B[i];
 
 	// auto doesn't work for some reason...
-	for(int i=0; i<ptr.size(); ++i) 	cout << ptr[i] << " "; cout << endl;
-	for(int i=0; i<indices.size(); ++i) cout << indices[i] << " "; cout << endl;
-	for(int i=0; i<data.size(); ++i) 	cout << data[i] << " "; cout << endl;
-	for(int i=0; i<B.size(); ++i) 		cout << B[i] << " "; cout << endl;
+	cout << "dim " << dim << endl;
+	cout << "ptr "; for(int i=0; i<ptr.size(); ++i) cout << ptr[i] << " "; cout << endl;
+	cout << "indices "; for(int i=0; i<indices.size(); ++i) cout << indices[i] << " "; cout << endl;
+	cout << "data "; for(int i=0; i<data.size(); ++i) cout << data[i] << " "; cout << endl;
+	cout << "B "; for(int i=0; i<B.size(); ++i) cout << B[i] << " "; cout << endl;
 	cout << "End of parsing\n";
+
+	// Compensating for dim/k
+	// if(dim%k != 0){
+	// 	for(int i=dim%k; i<k; ++i) ptr.push_back(local_ptr);
+	// }
+	// assert(ptr.size()%k == 1);
 }
 
 void init(){
+	C = vector<int>(end-start);
+
 	cudaMalloc((void **)&d_dim, sizeof(int));
-	cudaMalloc((void **)&d_ptr, ptr.size() * sizeof(int));
+	cudaMalloc((void **)&d_ptr, (end-start+1) * sizeof(int));
 	cudaMalloc((void **)&d_indices, indices.size() * sizeof(int));
 	cudaMalloc((void **)&d_data, data.size() * sizeof(int));
 	cudaMalloc((void **)&d_B, B.size() * sizeof(int));
 	cudaMalloc((void **)&d_C, C.size() * sizeof(int));
 
 	cudaMemcpy(d_dim, &dim, sizeof(int), cudaMemcpyHostToDevice);
-	cudaMemcpy(d_ptr, &ptr[0], ptr.size() * sizeof(int), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_ptr, &ptr[start], (end-start+1) * sizeof(int), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_indices, &indices[0], indices.size() * sizeof(int), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_data, &data[0], data.size() * sizeof(int), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_B, &B[0], B.size() * sizeof(int), cudaMemcpyHostToDevice);
@@ -131,22 +145,79 @@ __global__ void kernel_complex(
 	// printf("Final row %d sum %d tid %d \n", row, sum[tid], tid);
 }
 
+void send_receive_data(){
+	if(pid == 0){
+		start = 0;
+		end = dim/k;
+		size = ptr[end] - ptr[start];
+		for(int i=1; i<k; ++i){
+			// Send indices and data to process i
+			int start = i*dim/k;
+			int end = (i+1)*dim/k;
+			int size = ptr[end] - ptr[start];
+			MPI_Send(&indices[ptr[start]], size, MPI_INT, i, 0, MPI_COMM_WORLD);
+			MPI_Send(&data[ptr[start]], size, MPI_INT, i, 0, MPI_COMM_WORLD);
+		}
+		indices.resize(ptr[dim/k]);
+		data.resize(ptr[dim/k]);
+	}
+	else{
+		start = pid*dim/k;
+		end = (pid+1)*dim/k;
+		size = ptr[end] - ptr[start];
+		indices = vector<int>(size);
+		data = vector<int>(size);
+		// printf("pid %d start %d end %d size %d ptr_st %d ptr_end %d\n", pid, start, end, size, ptr[start], ptr[end]);
+		MPI_Recv(&indices[0], size, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		MPI_Recv(&data[0], size, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+		for(int i=end; i>=start; --i) ptr[i] -= ptr[start];
+	}
+}
+
+void write(){
+	// Write to file
+	int next = 1;
+	ofstream fout;
+	if(pid != 0) MPI_Recv(&next, 1, MPI_INT, pid-1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+	if(pid != 0) fout.open(writefile.c_str(), std::fstream::app);
+	else fout.open(writefile.c_str());
+	for(int i=0; i<C.size(); ++i) fout << C[i] << " ";
+	fout.close();
+	if(pid != k-1) MPI_Send(&next, 1, MPI_INT, pid+1, 0, MPI_COMM_WORLD);
+}
+
 int main(int argc, char const *argv[])
 {
+	MPI_Init(NULL, NULL);
+	MPI_Comm_rank(MPI_COMM_WORLD, &pid);
+	MPI_Comm_size(MPI_COMM_WORLD, &k);
+
 	string file = "input1.txt";
-	parse_input(file);
+	if(pid == 0) parse_input(file);
+	MPI_Bcast(&dim, 1, MPI_INT, 0, MPI_COMM_WORLD);
+	if(pid != 0) ptr = vector<int>(dim+1);
+	if(pid != 0) B = vector<int>(dim);
+	MPI_Bcast(&ptr[0], dim+1, MPI_INT, 0, MPI_COMM_WORLD);
+	MPI_Bcast(&B[0], dim, MPI_INT, 0, MPI_COMM_WORLD);
+	send_receive_data();
+
+	cout << "pid " << pid << " size " << size << endl;
+	cout << "pid " << pid << " dim " << dim << endl;
+	cout << "pid " << pid << " ptr "; for(int i=start; i<=end; ++i) cout << ptr[i] << " "; cout << endl;
+	cout << "pid " << pid << " indices "; for(int i=0; i<indices.size(); ++i) cout << indices[i] << " "; cout << endl;
+	cout << "pid " << pid << " data "; for(int i=0; i<data.size(); ++i) cout << data[i] << " "; cout << endl;
+	cout << "pid " << pid << " B "; for(int i=0; i<B.size(); ++i) cout << B[i] << " "; cout << endl;
+
 	init();
 
-	// int *count;
-	// cudaGetDeviceCount(count);
-	// cudaDeviceSynchronize();
-	// cout << "device count " << (*count) << endl;
-
-
-	int thread = (dim+block-1)/block;
+	int thread = (C.size()+block-1)/block;
 	kernel_complex<<<block, 32*thread>>>(d_dim, d_ptr, d_indices, d_data, d_B, d_C);
 
 	anti_init();
-	for(int i=0; i<C.size(); ++i) cout << C[i] << " "; cout << endl;
+	
+	cout << "C for pid " << pid << " : "; for(int i=0; i<C.size(); ++i) cout << C[i] << " "; cout << endl;
+	write();
+	MPI_Finalize();
 	return 0;
 }
