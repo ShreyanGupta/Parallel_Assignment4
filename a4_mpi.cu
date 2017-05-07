@@ -16,6 +16,30 @@ using namespace std;
 
 #define thread 1024
 
+// inline int read_int(){
+// 	char r;
+// 	bool start=false, neg=false;
+// 	int ret=0;
+// 	while(true){
+// 		r=getchar_unlocked();
+// 		if((r-'0'<0 || r-'0'>9) && r!='-' && !start){
+// 			continue;
+// 		}
+// 		if((r-'0'<0 || r-'0'>9) && r!='-' && start){
+// 			break;
+// 		}
+// 		if(start)ret*=10;
+// 		start=true;
+// 		if(r=='-')neg=true;
+// 		else ret+=r-'0';
+// 	}
+// 	if(!neg)
+// 		return ret;
+// 	else
+// 		return -ret;
+// }
+
+
 int pid;
 int k;
 int start=0, end, size;
@@ -32,12 +56,58 @@ int *d_ptr, *d_indices, *d_data;
 int *d_B;
 long long *d_C;
 
+// void parse_input2() {
+// 	// string input in ifstream not working. Don't ask why
+// 	// stoi not working. Also don't ask why
+// 	freopen(readfile.c_str(), "r", stdin);
+// 	string r, temp;
+// 	int c, d;
+// 	cin >> temp >> temp >> temp >> dim >> temp;
+// 	cin >> r;
+// 	c = read_int();
+// 	d = read_int();
+
+// 	B = vector<int>(dim);
+
+// 	int current_row = 0;
+// 	int local_ptr = 0;
+// 	ptr.push_back(0);
+
+// 	while(r[0] != 'B'){
+// 		// cout << r << " " << c << " " << d << endl;
+// 		int this_row = atoi(r.c_str());
+// 		for(int i=current_row; i<this_row; ++i) ptr.push_back(local_ptr);
+// 		indices.push_back(c);
+// 		data.push_back(d);
+// 		current_row = this_row;
+// 		++local_ptr;
+// 		cin >> r;
+// 		c = read_int();
+// 		d = read_int();
+// 	}
+// 	ptr.push_back(local_ptr);
+// 	B[0] = c;
+// 	B[1] = d;
+// 	for(int i=2; i<dim; ++i) 
+// 		B[i] = read_int();
+// 	// auto doesn't work for some reason...
+// 	// cout << "dim " << dim << endl;
+// 	// cout << "ptr "; for(int i=0; i<ptr.size(); ++i) cout << ptr[i] << " "; cout << endl;
+// 	// cout << "indices "; for(int i=0; i<indices.size(); ++i) cout << indices[i] << " "; cout << endl;
+// 	// cout << "data "; for(int i=0; i<data.size(); ++i) cout << data[i] << " "; cout << endl;
+// 	// cout << "B "; for(int i=0; i<B.size(); ++i) cout << B[i] << " "; cout << endl;
+// 	// cout << "End of parsing\n";
+// }
+
+
+
 void parse_input(){
 
 	// string input in ifstream not working. Don't ask why
 	// stoi not working. Also don't ask why
 	ifstream fin(readfile.c_str());
-	string r,c,d,temp;
+	string r,temp;
+	int c,d;
 	fin >> temp >> temp >> temp >> dim >> temp;
 	fin >> r >> c >> d;
 	B = vector<int>(dim);
@@ -49,15 +119,15 @@ void parse_input(){
 		// cout << r << " " << c << " " << d << endl;
 		int this_row = atoi(r.c_str());
 		for(int i=current_row; i<this_row; ++i) ptr.push_back(local_ptr);
-		indices.push_back(atoi(c.c_str()));
-		data.push_back(atoi(d.c_str()));
+		indices.push_back(c);
+		data.push_back(d);
 		current_row = this_row;
 		++local_ptr;
 		fin >> r >> c >> d;
 	}
 	ptr.push_back(local_ptr);
-	B[0] = atoi(c.c_str());
-	B[1] = atoi(d.c_str());
+	B[0] = c;
+	B[1] = d;
 	for(int i=2; i<dim; ++i) fin >> B[i];
 
 	// auto doesn't work for some reason...
@@ -129,12 +199,13 @@ __global__ void kernel_complex(
 	int row = id/32;
 	int lane = id & (32 - 1);
 	sum[tid] = 0;
+	// printf("row %d sum %d tid %d lane %d\n", row, sum[tid], tid, lane);
 	if(row < *dim){
-		// printf("row %d sum %d tid %d lane %d\n", row, sum[tid], tid, lane);
-		for(int i=ptr[row] + lane; i<ptr[row+1]; i+=32){
+		int start = ptr[row];
+		int end = ptr[row+1];
+		for(int i=start + lane; i<end; i+=32){
 			sum[tid] += (long long)data[i] * (long long)B[indices[i]];
 		}
-		// printf("row %d sum %d tid %d lane %d\n", row, sum[tid], tid, lane);
 	}
 	// __syncthreads();
 	if(lane < 16) sum[tid] += sum[tid + 16];
@@ -144,6 +215,7 @@ __global__ void kernel_complex(
 	if(lane < 1) sum[tid] += sum[tid + 1];
 	if(lane == 0) C[row] = sum[tid];
 	// printf("Final row %d sum %d tid %d \n", row, sum[tid], tid);
+	// if(row < *dim) printf("id %d tid %d row %d lane %d sum %d\n", id, tid, row, lane, sum[tid]);
 }
 
 void send_receive_data(){
@@ -189,16 +261,9 @@ void write(){
 		fout.close();
 		MPI_Barrier(MPI_COMM_WORLD);
 	}
-
-	// int next = 1;
-	// ofstream fout;
-	// if(pid != 0) MPI_Recv(&next, 1, MPI_INT, pid-1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-	// if(pid != 0) fout.open(writefile.c_str(), std::fstream::app);
-	// else fout.open(writefile.c_str());
-	// for(int i=0; i<C.size(); ++i) fout << C[i] << "\n";
-	// fout.close();
-	// if(pid != k-1) MPI_Send(&next, 1, MPI_INT, pid+1, 0, MPI_COMM_WORLD);
 }
+
+double start_time;
 
 int main(int argc, char const *argv[])
 {
@@ -206,15 +271,21 @@ int main(int argc, char const *argv[])
 	MPI_Comm_rank(MPI_COMM_WORLD, &pid);
 	MPI_Comm_size(MPI_COMM_WORLD, &k);
 
+	start_time = MPI_Wtime();
+
 	readfile = string(argv[1]);
 	writefile = string(argv[2]);
-	if(pid == 0) parse_input();
+	if(pid == 0) parse_input2();
 	MPI_Bcast(&dim, 1, MPI_INT, 0, MPI_COMM_WORLD);
 	if(pid != 0) ptr = vector<int>(dim+1);
 	if(pid != 0) B = vector<int>(dim);
 	MPI_Bcast(&ptr[0], dim+1, MPI_INT, 0, MPI_COMM_WORLD);
 	MPI_Bcast(&B[0], dim, MPI_INT, 0, MPI_COMM_WORLD);
 	send_receive_data();
+	MPI_Barrier(MPI_COMM_WORLD);
+
+	if(pid == 0) cout << "reading time " << (MPI_Wtime() - start_time) << endl;
+	start_time = MPI_Wtime();
 
 	// if(pid == 0){
 	// 	cout << "pid " << pid << " size " << size << endl;
@@ -235,17 +306,17 @@ int main(int argc, char const *argv[])
 	// }
 
 	init();
-
 	int block = ceil(1.0f * C.size()/(thread/32));
 	kernel_complex<<<block, thread>>>(d_dim, d_ptr, d_indices, d_data, d_B, d_C);
-	// int block = ceil(1.0f * C.size()/thread);
-	// kernel<<<block, thread>>>(d_dim, d_ptr, d_indices, d_data, d_B, d_C);
-	cout << "block " << block << " C " << C.size() << endl;
-
 	anti_init();
 	
+	if(pid == 0) cout << "gpu time " << (MPI_Wtime() - start_time) << endl;
+	start_time = MPI_Wtime();
+
+	cout << "pid " << pid << " block " << block << " C " << C.size() << endl;
 	// cout << "C for pid " << pid << " : "; for(int i=0; i<C.size(); ++i) cout << C[i] << " "; cout << endl;
 	write();
+	if(pid == 0) cout << "write time " << (MPI_Wtime() - start_time) << endl;
 	MPI_Finalize();
 	return 0;
 }
